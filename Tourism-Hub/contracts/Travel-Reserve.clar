@@ -18,6 +18,7 @@
 (define-constant ERR-INVALID-RATING-VALUE (err u108))
 (define-constant ERR-REVIEW-ALREADY-SUBMITTED (err u109))
 (define-constant ERR-BOOKING-NOT-COMPLETED-YET (err u110))
+(define-constant ERR-INVALID-INPUT-DATA (err u111))
 
 ;; Platform configuration variables
 (define-data-var total-experiences-created uint u0)
@@ -167,6 +168,9 @@
 ;; Register new service provider profile
 (define-public (register-service-provider-profile (display-name (string-ascii 100)) (bio-description (string-ascii 300)))
   (let ((existing-provider-profile (map-get? service-provider-profiles { provider-principal: tx-sender })))
+    (asserts! (> (len display-name) u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= (len display-name) u100) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= (len bio-description) u300) ERR-INVALID-INPUT-DATA)
     (if (is-some existing-provider-profile)
       ERR-RESOURCE-ALREADY-EXISTS
       (ok (map-set service-provider-profiles 
@@ -198,190 +202,79 @@
   (experience-category (string-ascii 50))
 )
   (let ((new-experience-id (+ (var-get total-experiences-created) u1)))
-    (if (and (> price-per-participant u0) (> maximum-participants u0) (> duration-in-hours u0))
-      (begin
-        (map-set travel-experiences
-          { experience-identifier: new-experience-id }
+    (asserts! (> (len experience-title) u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= (len experience-title) u100) ERR-INVALID-INPUT-DATA)
+    (asserts! (> (len detailed-description) u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= (len detailed-description) u500) ERR-INVALID-INPUT-DATA)
+    (asserts! (> (len experience-location) u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= (len experience-location) u100) ERR-INVALID-INPUT-DATA)
+    (asserts! (> (len experience-category) u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= (len experience-category) u50) ERR-INVALID-INPUT-DATA)
+    (asserts! (> price-per-participant u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (> maximum-participants u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (> duration-in-hours u0) ERR-INVALID-INPUT-DATA)
+    
+    (begin
+      (map-set travel-experiences
+        { experience-identifier: new-experience-id }
+        {
+          experience-provider: tx-sender,
+          experience-title: experience-title,
+          detailed-description: detailed-description,
+          experience-location: experience-location,
+          price-per-participant: price-per-participant,
+          maximum-participants: maximum-participants,
+          duration-in-hours: duration-in-hours,
+          experience-category: experience-category,
+          current-status: experience-status-active,
+          completed-bookings-count: u0,
+          calculated-average-rating: u0,
+          total-reviews-received: u0,
+          creation-timestamp: block-height
+        }
+      )
+      (var-set total-experiences-created new-experience-id)
+      
+      ;; Update or create provider profile
+      (match (map-get? service-provider-profiles { provider-principal: tx-sender })
+        existing-profile (map-set service-provider-profiles 
+          { provider-principal: tx-sender }
+          (merge existing-profile { total-created-experiences: (+ (get total-created-experiences existing-profile) u1) })
+        )
+        ;; Auto-create basic profile if doesn't exist
+        (map-set service-provider-profiles 
+          { provider-principal: tx-sender }
           {
-            experience-provider: tx-sender,
-            experience-title: experience-title,
-            detailed-description: detailed-description,
-            experience-location: experience-location,
-            price-per-participant: price-per-participant,
-            maximum-participants: maximum-participants,
-            duration-in-hours: duration-in-hours,
-            experience-category: experience-category,
-            current-status: experience-status-active,
-            completed-bookings-count: u0,
-            calculated-average-rating: u0,
-            total-reviews-received: u0,
-            creation-timestamp: block-height
+            provider-display-name: "",
+            provider-bio-description: "",
+            total-created-experiences: u1,
+            total-completed-bookings: u0,
+            provider-average-rating: u0,
+            verification-status: false,
+            profile-creation-timestamp: block-height
           }
         )
-        (var-set total-experiences-created new-experience-id)
-        
-        ;; Update or create provider profile
-        (match (map-get? service-provider-profiles { provider-principal: tx-sender })
-          existing-profile (map-set service-provider-profiles 
-            { provider-principal: tx-sender }
-            (merge existing-profile { total-created-experiences: (+ (get total-created-experiences existing-profile) u1) })
-          )
-          ;; Auto-create basic profile if doesn't exist
-          (map-set service-provider-profiles 
-            { provider-principal: tx-sender }
-            {
-              provider-display-name: "",
-              provider-bio-description: "",
-              total-created-experiences: u1,
-              total-completed-bookings: u0,
-              provider-average-rating: u0,
-              verification-status: false,
-              profile-creation-timestamp: block-height
-            }
-          )
-        )
-        
-        (ok new-experience-id)
       )
-      ERR-INVALID-AMOUNT-PROVIDED
+      
+      (ok new-experience-id)
     )
   )
 )
 
 ;; Update experience operational status
 (define-public (update-experience-operational-status (experience-identifier uint) (new-operational-status uint))
-  (match (map-get? travel-experiences { experience-identifier: experience-identifier })
-    target-experience
-    (if (is-eq (get experience-provider target-experience) tx-sender)
-      (if (or (is-eq new-operational-status experience-status-active) 
-              (is-eq new-operational-status experience-status-inactive) 
-              (is-eq new-operational-status experience-status-suspended))
-        (ok (map-set travel-experiences 
-          { experience-identifier: experience-identifier }
-          (merge target-experience { current-status: new-operational-status })
-        ))
-        ERR-INVALID-STATUS-TRANSITION
-      )
-      ERR-UNAUTHORIZED-ACCESS
-    )
-    ERR-RESOURCE-NOT-FOUND
-  )
-)
-
-;; Configure experience availability for specific dates
-(define-public (configure-experience-availability (experience-identifier uint) (target-date uint) (available-spots uint))
-  (match (map-get? travel-experiences { experience-identifier: experience-identifier })
-    target-experience
-    (if (is-eq (get experience-provider target-experience) tx-sender)
-      (if (<= available-spots (get maximum-participants target-experience))
-        (ok (map-set experience-availability-calendar
-          { target-experience-id: experience-identifier, target-date: target-date }
-          { remaining-available-spots: available-spots }
-        ))
-        ERR-INVALID-AMOUNT-PROVIDED
-      )
-      ERR-UNAUTHORIZED-ACCESS
-    )
-    ERR-RESOURCE-NOT-FOUND
-  )
-)
-
-;; CUSTOMER BOOKING MANAGEMENT FUNCTIONS
-
-;; Process customer booking request
-(define-public (process-customer-booking-request (experience-identifier uint) (number-of-participants uint) (scheduled-experience-date uint))
-  (match (map-get? travel-experiences { experience-identifier: experience-identifier })
-    target-experience
-    (let (
-      (base-booking-amount (* (get price-per-participant target-experience) number-of-participants))
-      (total-booking-amount (calculate-total-booking-price base-booking-amount))
-      (new-booking-identifier (+ (var-get total-bookings-created) u1))
-      (current-availability (map-get? experience-availability-calendar { target-experience-id: experience-identifier, target-date: scheduled-experience-date }))
-    )
-      (if (and 
-        (is-eq (get current-status target-experience) experience-status-active)
-        (> number-of-participants u0)
-        (<= number-of-participants (get maximum-participants target-experience))
-        (> scheduled-experience-date block-height)
-      )
-        (begin
-          ;; Validate and reserve availability
-          (asserts! 
-            (match current-availability
-              availability-data
-              (if (>= (get remaining-available-spots availability-data) number-of-participants)
-                (begin
-                  (map-set experience-availability-calendar
-                    { target-experience-id: experience-identifier, target-date: scheduled-experience-date }
-                    { remaining-available-spots: (- (get remaining-available-spots availability-data) number-of-participants) }
-                  )
-                  true
-                )
-                false
-              )
-              ;; Initialize availability if not set
-              (if (<= number-of-participants (get maximum-participants target-experience))
-                (begin
-                  (map-set experience-availability-calendar
-                    { target-experience-id: experience-identifier, target-date: scheduled-experience-date }
-                    { remaining-available-spots: (- (get maximum-participants target-experience) number-of-participants) }
-                  )
-                  true
-                )
-                false
-              )
-            )
-            ERR-INSUFFICIENT-PAYMENT-AMOUNT
-          )
-          
-          ;; Create booking record
-          (map-set customer-bookings-registry
-            { booking-identifier: new-booking-identifier }
-            {
-              booked-experience-id: experience-identifier,
-              booking-customer: tx-sender,
-              number-of-participants: number-of-participants,
-              total-payment-amount: total-booking-amount,
-              booking-creation-date: block-height,
-              scheduled-experience-date: scheduled-experience-date,
-              booking-current-status: booking-status-pending,
-              booking-creation-timestamp: block-height
-            }
-          )
-          
-          ;; Create customer lookup entry
-          (map-set customer-booking-lookup
-            { customer-principal: tx-sender, booking-reference-id: new-booking-identifier }
-            { referenced-experience-id: experience-identifier }
-          )
-          
-          ;; Update experience booking statistics
-          (map-set travel-experiences
+  (begin
+    (asserts! (> experience-identifier u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= experience-identifier (var-get total-experiences-created)) ERR-INVALID-INPUT-DATA)
+    (match (map-get? travel-experiences { experience-identifier: experience-identifier })
+      target-experience
+      (if (is-eq (get experience-provider target-experience) tx-sender)
+        (if (or (is-eq new-operational-status experience-status-active) 
+                (is-eq new-operational-status experience-status-inactive) 
+                (is-eq new-operational-status experience-status-suspended))
+          (ok (map-set travel-experiences 
             { experience-identifier: experience-identifier }
-            (merge target-experience { completed-bookings-count: (+ (get completed-bookings-count target-experience) u1) })
-          )
-          
-          (var-set total-bookings-created new-booking-identifier)
-          (ok new-booking-identifier)
-        )
-        ERR-INVALID-AMOUNT-PROVIDED
-      )
-    )
-    ERR-RESOURCE-NOT-FOUND
-  )
-)
-
-;; Provider confirms pending booking
-(define-public (confirm-pending-customer-booking (booking-identifier uint))
-  (match (map-get? customer-bookings-registry { booking-identifier: booking-identifier })
-    target-booking
-    (match (map-get? travel-experiences { experience-identifier: (get booked-experience-id target-booking) })
-      associated-experience
-      (if (is-eq (get experience-provider associated-experience) tx-sender)
-        (if (is-eq (get booking-current-status target-booking) booking-status-pending)
-          (ok (map-set customer-bookings-registry
-            { booking-identifier: booking-identifier }
-            (merge target-booking { booking-current-status: booking-status-confirmed })
+            (merge target-experience { current-status: new-operational-status })
           ))
           ERR-INVALID-STATUS-TRANSITION
         )
@@ -389,34 +282,219 @@
       )
       ERR-RESOURCE-NOT-FOUND
     )
-    ERR-RESOURCE-NOT-FOUND
+  )
+)
+
+;; Configure experience availability for specific dates
+(define-public (configure-experience-availability (experience-identifier uint) (target-date uint) (available-spots uint))
+  (begin
+    (asserts! (> experience-identifier u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= experience-identifier (var-get total-experiences-created)) ERR-INVALID-INPUT-DATA)
+    (asserts! (> target-date u0) ERR-INVALID-INPUT-DATA)
+    (match (map-get? travel-experiences { experience-identifier: experience-identifier })
+      target-experience
+      (if (is-eq (get experience-provider target-experience) tx-sender)
+        (if (<= available-spots (get maximum-participants target-experience))
+          (ok (map-set experience-availability-calendar
+            { target-experience-id: experience-identifier, target-date: target-date }
+            { remaining-available-spots: available-spots }
+          ))
+          ERR-INVALID-AMOUNT-PROVIDED
+        )
+        ERR-UNAUTHORIZED-ACCESS
+      )
+      ERR-RESOURCE-NOT-FOUND
+    )
+  )
+)
+
+;; CUSTOMER BOOKING MANAGEMENT FUNCTIONS
+
+;; Process customer booking request
+(define-public (process-customer-booking-request (experience-identifier uint) (number-of-participants uint) (scheduled-experience-date uint))
+  (begin
+    (asserts! (> experience-identifier u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= experience-identifier (var-get total-experiences-created)) ERR-INVALID-INPUT-DATA)
+    (asserts! (> number-of-participants u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (> scheduled-experience-date u0) ERR-INVALID-INPUT-DATA)
+    (match (map-get? travel-experiences { experience-identifier: experience-identifier })
+      target-experience
+      (let (
+        (base-booking-amount (* (get price-per-participant target-experience) number-of-participants))
+        (total-booking-amount (calculate-total-booking-price base-booking-amount))
+        (new-booking-identifier (+ (var-get total-bookings-created) u1))
+        (current-availability (map-get? experience-availability-calendar { target-experience-id: experience-identifier, target-date: scheduled-experience-date }))
+      )
+        (if (and 
+          (is-eq (get current-status target-experience) experience-status-active)
+          (<= number-of-participants (get maximum-participants target-experience))
+          (> scheduled-experience-date block-height)
+        )
+          (begin
+            ;; Validate and reserve availability
+            (asserts! 
+              (match current-availability
+                availability-data
+                (if (>= (get remaining-available-spots availability-data) number-of-participants)
+                  (begin
+                    (map-set experience-availability-calendar
+                      { target-experience-id: experience-identifier, target-date: scheduled-experience-date }
+                      { remaining-available-spots: (- (get remaining-available-spots availability-data) number-of-participants) }
+                    )
+                    true
+                  )
+                  false
+                )
+                ;; Initialize availability if not set
+                (if (<= number-of-participants (get maximum-participants target-experience))
+                  (begin
+                    (map-set experience-availability-calendar
+                      { target-experience-id: experience-identifier, target-date: scheduled-experience-date }
+                      { remaining-available-spots: (- (get maximum-participants target-experience) number-of-participants) }
+                    )
+                    true
+                  )
+                  false
+                )
+              )
+              ERR-INSUFFICIENT-PAYMENT-AMOUNT
+            )
+            
+            ;; Create booking record
+            (map-set customer-bookings-registry
+              { booking-identifier: new-booking-identifier }
+              {
+                booked-experience-id: experience-identifier,
+                booking-customer: tx-sender,
+                number-of-participants: number-of-participants,
+                total-payment-amount: total-booking-amount,
+                booking-creation-date: block-height,
+                scheduled-experience-date: scheduled-experience-date,
+                booking-current-status: booking-status-pending,
+                booking-creation-timestamp: block-height
+              }
+            )
+            
+            ;; Create customer lookup entry
+            (map-set customer-booking-lookup
+              { customer-principal: tx-sender, booking-reference-id: new-booking-identifier }
+              { referenced-experience-id: experience-identifier }
+            )
+            
+            ;; Update experience booking statistics
+            (map-set travel-experiences
+              { experience-identifier: experience-identifier }
+              (merge target-experience { completed-bookings-count: (+ (get completed-bookings-count target-experience) u1) })
+            )
+            
+            (var-set total-bookings-created new-booking-identifier)
+            (ok new-booking-identifier)
+          )
+          ERR-INVALID-AMOUNT-PROVIDED
+        )
+      )
+      ERR-RESOURCE-NOT-FOUND
+    )
+  )
+)
+
+;; Provider confirms pending booking
+(define-public (confirm-pending-customer-booking (booking-identifier uint))
+  (begin
+    (asserts! (> booking-identifier u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= booking-identifier (var-get total-bookings-created)) ERR-INVALID-INPUT-DATA)
+    (match (map-get? customer-bookings-registry { booking-identifier: booking-identifier })
+      target-booking
+      (match (map-get? travel-experiences { experience-identifier: (get booked-experience-id target-booking) })
+        associated-experience
+        (if (is-eq (get experience-provider associated-experience) tx-sender)
+          (if (is-eq (get booking-current-status target-booking) booking-status-pending)
+            (ok (map-set customer-bookings-registry
+              { booking-identifier: booking-identifier }
+              (merge target-booking { booking-current-status: booking-status-confirmed })
+            ))
+            ERR-INVALID-STATUS-TRANSITION
+          )
+          ERR-UNAUTHORIZED-ACCESS
+        )
+        ERR-RESOURCE-NOT-FOUND
+      )
+      ERR-RESOURCE-NOT-FOUND
+    )
   )
 )
 
 ;; Mark booking as completed after experience
 (define-public (mark-booking-as-completed (booking-identifier uint))
-  (match (map-get? customer-bookings-registry { booking-identifier: booking-identifier })
-    target-booking
-    (match (map-get? travel-experiences { experience-identifier: (get booked-experience-id target-booking) })
-      associated-experience
-      (if (is-eq (get experience-provider associated-experience) tx-sender)
+  (begin
+    (asserts! (> booking-identifier u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= booking-identifier (var-get total-bookings-created)) ERR-INVALID-INPUT-DATA)
+    (match (map-get? customer-bookings-registry { booking-identifier: booking-identifier })
+      target-booking
+      (match (map-get? travel-experiences { experience-identifier: (get booked-experience-id target-booking) })
+        associated-experience
+        (if (is-eq (get experience-provider associated-experience) tx-sender)
+          (if (and 
+            (is-eq (get booking-current-status target-booking) booking-status-confirmed)
+            (<= (get scheduled-experience-date target-booking) block-height)
+          )
+            (begin
+              (map-set customer-bookings-registry
+                { booking-identifier: booking-identifier }
+                (merge target-booking { booking-current-status: booking-status-completed })
+              )
+              
+              ;; Update provider completion statistics
+              (match (map-get? service-provider-profiles { provider-principal: tx-sender })
+                provider-profile (map-set service-provider-profiles 
+                  { provider-principal: tx-sender }
+                  (merge provider-profile { total-completed-bookings: (+ (get total-completed-bookings provider-profile) u1) })
+                )
+                true ;; Handle missing profile gracefully
+              )
+              
+              (ok true)
+            )
+            ERR-INVALID-STATUS-TRANSITION
+          )
+          ERR-UNAUTHORIZED-ACCESS
+        )
+        ERR-RESOURCE-NOT-FOUND
+      )
+      ERR-RESOURCE-NOT-FOUND
+    )
+  )
+)
+
+;; Customer cancels their booking
+(define-public (cancel-customer-booking (booking-identifier uint))
+  (begin
+    (asserts! (> booking-identifier u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= booking-identifier (var-get total-bookings-created)) ERR-INVALID-INPUT-DATA)
+    (match (map-get? customer-bookings-registry { booking-identifier: booking-identifier })
+      target-booking
+      (if (is-eq (get booking-customer target-booking) tx-sender)
         (if (and 
-          (is-eq (get booking-current-status target-booking) booking-status-confirmed)
-          (<= (get scheduled-experience-date target-booking) block-height)
+          (or (is-eq (get booking-current-status target-booking) booking-status-pending) 
+              (is-eq (get booking-current-status target-booking) booking-status-confirmed))
+          (> (get scheduled-experience-date target-booking) block-height)
         )
           (begin
+            ;; Update booking status
             (map-set customer-bookings-registry
               { booking-identifier: booking-identifier }
-              (merge target-booking { booking-current-status: booking-status-completed })
+              (merge target-booking { booking-current-status: booking-status-cancelled })
             )
             
-            ;; Update provider completion statistics
-            (match (map-get? service-provider-profiles { provider-principal: tx-sender })
-              provider-profile (map-set service-provider-profiles 
-                { provider-principal: tx-sender }
-                (merge provider-profile { total-completed-bookings: (+ (get total-completed-bookings provider-profile) u1) })
+            ;; Restore availability
+            (match (map-get? experience-availability-calendar 
+              { target-experience-id: (get booked-experience-id target-booking), target-date: (get scheduled-experience-date target-booking) })
+              availability-data
+              (map-set experience-availability-calendar
+                { target-experience-id: (get booked-experience-id target-booking), target-date: (get scheduled-experience-date target-booking) }
+                { remaining-available-spots: (+ (get remaining-available-spots availability-data) (get number-of-participants target-booking)) }
               )
-              true ;; Handle missing profile gracefully
+              true ;; Handle missing availability entry
             )
             
             (ok true)
@@ -427,45 +505,6 @@
       )
       ERR-RESOURCE-NOT-FOUND
     )
-    ERR-RESOURCE-NOT-FOUND
-  )
-)
-
-;; Customer cancels their booking
-(define-public (cancel-customer-booking (booking-identifier uint))
-  (match (map-get? customer-bookings-registry { booking-identifier: booking-identifier })
-    target-booking
-    (if (is-eq (get booking-customer target-booking) tx-sender)
-      (if (and 
-        (or (is-eq (get booking-current-status target-booking) booking-status-pending) 
-            (is-eq (get booking-current-status target-booking) booking-status-confirmed))
-        (> (get scheduled-experience-date target-booking) block-height)
-      )
-        (begin
-          ;; Update booking status
-          (map-set customer-bookings-registry
-            { booking-identifier: booking-identifier }
-            (merge target-booking { booking-current-status: booking-status-cancelled })
-          )
-          
-          ;; Restore availability
-          (match (map-get? experience-availability-calendar 
-            { target-experience-id: (get booked-experience-id target-booking), target-date: (get scheduled-experience-date target-booking) })
-            availability-data
-            (map-set experience-availability-calendar
-              { target-experience-id: (get booked-experience-id target-booking), target-date: (get scheduled-experience-date target-booking) }
-              { remaining-available-spots: (+ (get remaining-available-spots availability-data) (get number-of-participants target-booking)) }
-            )
-            true ;; Handle missing availability entry
-          )
-          
-          (ok true)
-        )
-        ERR-INVALID-STATUS-TRANSITION
-      )
-      ERR-UNAUTHORIZED-ACCESS
-    )
-    ERR-RESOURCE-NOT-FOUND
   )
 )
 
@@ -473,70 +512,77 @@
 
 ;; Submit customer review after completed experience
 (define-public (submit-customer-experience-review (experience-identifier uint) (booking-identifier uint) (customer-rating uint) (review-comment (string-ascii 500)))
-  (match (map-get? customer-bookings-registry { booking-identifier: booking-identifier })
-    target-booking
-    (if (and 
-      (is-eq (get booking-customer target-booking) tx-sender)
-      (is-eq (get booked-experience-id target-booking) experience-identifier)
-      (is-eq (get booking-current-status target-booking) booking-status-completed)
-      (>= customer-rating u1)
-      (<= customer-rating u5)
-      (not (has-customer-reviewed-experience experience-identifier tx-sender))
-    )
-      (match (map-get? travel-experiences { experience-identifier: experience-identifier })
-        target-experience
-        (let (
-          (current-review-count (get total-reviews-received target-experience))
-          (current-rating-average (get calculated-average-rating target-experience))
-          (updated-review-count (+ current-review-count u1))
-          (updated-rating-average (/ (+ (* current-rating-average current-review-count) customer-rating) updated-review-count))
-        )
-          ;; Store customer review
-          (map-set customer-reviews-registry
-            { reviewed-experience-id: experience-identifier, reviewing-customer: tx-sender }
-            {
-              associated-booking-id: booking-identifier,
-              customer-rating: customer-rating,
-              review-comment: review-comment,
-              review-submission-timestamp: block-height
-            }
-          )
-          
-          ;; Update experience rating statistics
-          (map-set travel-experiences
-            { experience-identifier: experience-identifier }
-            (merge target-experience { 
-              calculated-average-rating: updated-rating-average,
-              total-reviews-received: updated-review-count
-            })
-          )
-          
-          ;; Update provider rating statistics
-          (match (map-get? service-provider-profiles { provider-principal: (get experience-provider target-experience) })
-            provider-profile
-            (let (
-              (current-provider-rating (get provider-average-rating provider-profile))
-              (updated-provider-rating (if (is-eq current-provider-rating u0) 
-                customer-rating 
-                ;; Simplified moving average calculation
-                (/ (+ current-provider-rating customer-rating) u2)
-              ))
-            )
-              (map-set service-provider-profiles
-                { provider-principal: (get experience-provider target-experience) }
-                (merge provider-profile { provider-average-rating: updated-provider-rating })
-              )
-            )
-            true ;; Handle missing profile gracefully
-          )
-          
-          (ok true)
-        )
-        ERR-RESOURCE-NOT-FOUND
+  (begin
+    (asserts! (> experience-identifier u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= experience-identifier (var-get total-experiences-created)) ERR-INVALID-INPUT-DATA)
+    (asserts! (> booking-identifier u0) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= booking-identifier (var-get total-bookings-created)) ERR-INVALID-INPUT-DATA)
+    (asserts! (<= (len review-comment) u500) ERR-INVALID-INPUT-DATA)
+    (match (map-get? customer-bookings-registry { booking-identifier: booking-identifier })
+      target-booking
+      (if (and 
+        (is-eq (get booking-customer target-booking) tx-sender)
+        (is-eq (get booked-experience-id target-booking) experience-identifier)
+        (is-eq (get booking-current-status target-booking) booking-status-completed)
+        (>= customer-rating u1)
+        (<= customer-rating u5)
+        (not (has-customer-reviewed-experience experience-identifier tx-sender))
       )
-      ERR-INVALID-RATING-VALUE
+        (match (map-get? travel-experiences { experience-identifier: experience-identifier })
+          target-experience
+          (let (
+            (current-review-count (get total-reviews-received target-experience))
+            (current-rating-average (get calculated-average-rating target-experience))
+            (updated-review-count (+ current-review-count u1))
+            (updated-rating-average (/ (+ (* current-rating-average current-review-count) customer-rating) updated-review-count))
+          )
+            ;; Store customer review
+            (map-set customer-reviews-registry
+              { reviewed-experience-id: experience-identifier, reviewing-customer: tx-sender }
+              {
+                associated-booking-id: booking-identifier,
+                customer-rating: customer-rating,
+                review-comment: review-comment,
+                review-submission-timestamp: block-height
+              }
+            )
+            
+            ;; Update experience rating statistics
+            (map-set travel-experiences
+              { experience-identifier: experience-identifier }
+              (merge target-experience { 
+                calculated-average-rating: updated-rating-average,
+                total-reviews-received: updated-review-count
+              })
+            )
+            
+            ;; Update provider rating statistics
+            (match (map-get? service-provider-profiles { provider-principal: (get experience-provider target-experience) })
+              provider-profile
+              (let (
+                (current-provider-rating (get provider-average-rating provider-profile))
+                (updated-provider-rating (if (is-eq current-provider-rating u0) 
+                  customer-rating 
+                  ;; Simplified moving average calculation
+                  (/ (+ current-provider-rating customer-rating) u2)
+                ))
+              )
+                (map-set service-provider-profiles
+                  { provider-principal: (get experience-provider target-experience) }
+                  (merge provider-profile { provider-average-rating: updated-provider-rating })
+                )
+              )
+              true ;; Handle missing profile gracefully
+            )
+            
+            (ok true)
+          )
+          ERR-RESOURCE-NOT-FOUND
+        )
+        ERR-INVALID-RATING-VALUE
+      )
+      ERR-RESOURCE-NOT-FOUND
     )
-    ERR-RESOURCE-NOT-FOUND
   )
 )
 
@@ -555,7 +601,11 @@
 
 ;; Grant provider verification status (admin only)
 (define-public (grant-provider-verification-status (provider-principal principal))
-  (if (is-eq tx-sender contract-administrator)
+  (begin
+    (asserts! (is-eq tx-sender contract-administrator) ERR-OWNER-ONLY-ACCESS)
+    ;; Validate that the provider principal is not the zero principal and not empty
+    (asserts! (not (is-eq provider-principal 'SP000000000000000000002Q6VF78)) ERR-INVALID-INPUT-DATA)
+    ;; Ensure the provider profile exists before attempting to update
     (match (map-get? service-provider-profiles { provider-principal: provider-principal })
       provider-profile
       (ok (map-set service-provider-profiles
@@ -564,20 +614,23 @@
       ))
       ERR-RESOURCE-NOT-FOUND
     )
-    ERR-OWNER-ONLY-ACCESS
   )
 )
 
 ;; Suspend experience listing (admin only)
 (define-public (suspend-experience-listing (experience-identifier uint))
   (if (is-eq tx-sender contract-administrator)
-    (match (map-get? travel-experiences { experience-identifier: experience-identifier })
-      target-experience
-      (ok (map-set travel-experiences
-        { experience-identifier: experience-identifier }
-        (merge target-experience { current-status: experience-status-suspended })
-      ))
-      ERR-RESOURCE-NOT-FOUND
+    (begin
+      (asserts! (> experience-identifier u0) ERR-INVALID-INPUT-DATA)
+      (asserts! (<= experience-identifier (var-get total-experiences-created)) ERR-INVALID-INPUT-DATA)
+      (match (map-get? travel-experiences { experience-identifier: experience-identifier })
+        target-experience
+        (ok (map-set travel-experiences
+          { experience-identifier: experience-identifier }
+          (merge target-experience { current-status: experience-status-suspended })
+        ))
+        ERR-RESOURCE-NOT-FOUND
+      )
     )
     ERR-OWNER-ONLY-ACCESS
   )
